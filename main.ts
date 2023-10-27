@@ -1,32 +1,43 @@
-import type { Authorization, Note } from "kirika"
+import type { Authorization, Note } from "kirika";
 import {
   getAttachmentContent,
   getNoteContent,
   readMemosFromOpenAPI,
-} from "kirika"
-import type { App } from "obsidian"
+} from "kirika";
+import type { App } from "obsidian";
 import {
   normalizePath,
   Notice,
   Plugin,
   PluginSettingTab,
   Setting,
-} from "obsidian"
+  TFile
+} from "obsidian";
+import { getAllDailyNotes, createDailyNote, getDailyNote } from 'obsidian-daily-notes-interface';
+import moment from 'moment';
+
+
 
 /**
- * 每两小时，每小时，每半小时，每15分钟，每5分钟，关闭
+ * Possible sync intervals in minutes.
  */
-type Interval = 120 | 60 | 30 | 15 | 5 | 0
+type Interval = 120 | 60 | 30 | 15 | 5 | 0;
 
-type FileNameFormat = "id" | "created_at" | "updated_at" | "title"
+/**
+ * Formats for file names of synced memos.
+ */
+type FileNameFormat = "id" | "created_at" | "updated_at" | "title";
 
+/**
+ * Settings for the Memos Sync plugin.
+ */
 type MemosSyncPluginSettings = {
-  auth: Authorization
-  folderToSync: string
-  fileNameFormat: FileNameFormat
-  interval: Interval
-  lastSyncTime?: number
-}
+  auth: Authorization;
+  folderToSync: string;
+  fileNameFormat: FileNameFormat;
+  interval: Interval;
+  lastSyncTime?: number;
+};
 
 const DEFAULT_SETTINGS: MemosSyncPluginSettings = {
   auth: {
@@ -35,79 +46,49 @@ const DEFAULT_SETTINGS: MemosSyncPluginSettings = {
   folderToSync: "Memos Sync",
   fileNameFormat: "id",
   interval: 0,
-}
-
-function formatDateToFileFormat(date: Date) {
-  const year = date.getFullYear()
-  const month = date.getMonth() + 1
-  const day = date.getDate()
-  const hours = date.getHours()
-  const minutes = date.getMinutes()
-
-  return `${year}-${month}-${day}-${hours}-${minutes}`
-}
-
-function getFileName(memo: Note, format: FileNameFormat) {
-  switch (format) {
-    case "id":
-      return memo.id
-    case "created_at":
-      return formatDateToFileFormat(
-        memo.metadata.createdAt
-          ? new Date(memo.metadata.createdAt)
-          : new Date(),
-      )
-    case "updated_at":
-      return formatDateToFileFormat(
-        memo.metadata.updatedAt
-          ? new Date(memo.metadata.updatedAt)
-          : new Date(),
-      )
-    case "title":
-      return memo.title
-  }
-}
+};
 
 export default class MemosSyncPlugin extends Plugin {
-  settings: MemosSyncPluginSettings
-  timer: number | null = null
+  settings: MemosSyncPluginSettings;
+  timer: number | null = null;
 
   async registerSyncInterval() {
-    await this.loadSettings()
-    const { interval } = this.settings
+    await this.loadSettings();
+    const { interval } = this.settings;
     if (this.timer) {
-      window.clearInterval(this.timer)
+      window.clearInterval(this.timer);
     }
     if (interval > 0) {
       this.timer = this.registerInterval(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
         window.setInterval(this.sync.bind(this), interval * 60 * 1000),
-      )
+      );
     }
   }
 
   async onload() {
-    await this.registerSyncInterval()
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-    this.addRibbonIcon("refresh-ccw", "Memos Sync", this.sync.bind(this))
-    this.addSettingTab(new MemosSyncSettingTab(this.app, this))
+    await this.registerSyncInterval();
+    this.addRibbonIcon("refresh-ccw", "Memos Sync", this.sync.bind(this));
+    this.addSettingTab(new MemosSyncSettingTab(this.app, this));
   }
 
-  onunload() {}
+  onunload() { }
 
   async loadSettings() {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
   }
 
   async saveSettings() {
-    await this.saveData(this.settings)
+    await this.saveData(this.settings);
   }
 
   async sync() {
-    await this.loadSettings()
-    const { auth, folderToSync, lastSyncTime } = this.settings
+    await this.loadSettings();
+    const { auth, folderToSync, lastSyncTime } = this.settings;
+
+    // counters for the sync result
+    let sameCount = 0;
+    let updatedCount = 0;
+    let newCount = 0;
 
     if (!auth.baseUrl) {
       new Notice("Please enter the base URL.")
@@ -126,102 +107,108 @@ export default class MemosSyncPlugin extends Plugin {
       const memos = res.notes.filter((i) => !i.metadata.isArchived)
 
       const vault = this.app.vault
-      const adapter = this.app.vault.adapter
 
-      const isMemosFolderExists = await adapter.exists(`${folderToSync}/memos`)
-      if (!isMemosFolderExists) {
-        await vault.createFolder(`${folderToSync}/memos`)
-      }
-      const isResourcesFolderExists = await adapter.exists(
-        `${folderToSync}/resources`,
-      )
-      if (!isResourcesFolderExists) {
-        await vault.createFolder(`${folderToSync}/resources`)
-      }
+      // check if daily notes plugin is loaded
+
+      const allDailyNotes = getAllDailyNotes();
 
       memos.forEach((memo) => {
-        const memoPath = normalizePath(
-          `${folderToSync}/memos/${getFileName(
-            memo,
-            this.settings.fileNameFormat,
-          )}.md`,
-        )
-        const memoContent = getNoteContent(memo)
-        const lastUpdated = memo.metadata.updatedAt
+        const memoContent = getNoteContent(memo);
+        const created = memo.metadata.createdAt;
+        const updated = memo.metadata.updatedAt;
 
-        if (lastSyncTime && lastUpdated && lastUpdated * 1000 < lastSyncTime) {
-          return
+        const dailyNote = getDailyNote(moment(created), allDailyNotes);
+        // const memosOnDaily = getMemosOnDailyNote(dailyNote);
+        if (dailyNote) {
+          // memoContent add to dailyNote
+          // check if memoContent is already in dailyNote
+          // memo Resource add to dailyNote
+          const formattedTime = moment(created).format("hh:mm");
+          // console.log(memoContent);
+          // <br> 太多了
+          const formattedContent = memoContent.replace(/\n(?!\s*$)/g, '<br>');
+          // console.log(formattedContent);
+          const memosOnDaily: Map<string, string> = new Map<string, string>();
+
+          // const memosOnDaily: { timestamp: string; content: string; }[] = [];
+          vault.read(dailyNote).then((content) => {
+            // console.log(content);
+            const regex = /- (\d{1,2}:\d{2}) ((?:.|\n)+?)(?=\n- \d{1,2}:\d{2} |\n*$)/g;
+
+            let match;
+
+            while ((match = regex.exec(content)) !== null) {
+              const timestamp = match[1];
+              const content = match[2].trim();
+              memosOnDaily.set(timestamp, content);
+            }
+
+            // console.log(memosOnDaily);
+            // console.log(memosOnDaily.length);
+            // memosOnDaily is a set and formattedTime if in memosOnDaily
+            console.log(memosOnDaily);
+            if (memosOnDaily.has(formattedTime)) {
+              console.log("same memo", memosOnDaily.get(formattedTime), formattedContent);
+              console.log(created, updated);
+              if (updated !== created) {
+                // update dailynote's memo
+                console.log("memo update", memosOnDaily.get(formattedTime), formattedContent);
+                const updatedContent = content.replace(memosOnDaily.get(formattedTime)!, formattedContent);
+                vault.modify(dailyNote, updatedContent);
+                return;
+              }
+              return;
+            } else {
+              // insert dailynote
+              console.log("new memo", formattedTime, formattedContent);
+              vault.append(dailyNote, `- ${formattedTime} ${formattedContent}\n`);
+            }
+
+            // memosOnDaily.forEach((memo) => {
+            //   if (memo.timestamp === formattedTime && memo.content === formattedContent) {
+            //     console.log("same memo", memo.content, formattedContent);
+            //     return;
+            //   } else if (memo.timestamp === formattedTime && memo.content !== formattedContent) {
+            //     // update dailynote's memo
+            //     console.log("memo update", memo.content, formattedContent);
+            //     const updatedContent = content.replace(memo.content, formattedContent);
+            //     vault.modify(dailyNote, updatedContent);
+            //     return;
+            //   } else {
+            //     // insert dailynote
+            //     console.log("new memo", formattedContent);
+            //     vault.append(dailyNote, `- ${formattedTime} ${formattedContent}\n`);
+            //   }
+
+
+            // }
+            // );
+            // console.log(memosOnDaily);
+          });
+        } else {
+          createDailyNote(moment(created)).then((dailyNote) => {
+            // memoContent add to dailyNote
+            // memo Resource add to dailyNote
+            const formattedTime = moment(created).format("hh:mm");
+            const formattedContent = memoContent.replace(/\n(?!\s*$)/g, '<br>');
+            console.log(memoContent);
+            console.log(formattedContent);
+
+            vault.append(dailyNote, `- ${formattedTime} ${formattedContent}\n`);
+          });
         }
-        adapter.write(memoPath, memoContent).catch((e) => {
-          console.error(e)
-        })
+
+
+
+
+
       })
 
-      for (const resource of res.files) {
-        const resourcePath = normalizePath(
-          `${folderToSync}/resources/${resource.filename}`,
-        )
 
-        const isResourceExists = await adapter.exists(resourcePath)
-        if (isResourceExists) {
-          return
-        }
-
-        // check if resource.filename includes "/"
-        if (resource.filename.includes("/")) {
-          const resourcePathSplitted = resource.filename.split("/")
-          // create folders recursively
-          for (let i = 0; i < resourcePathSplitted.length - 1; i++) {
-            const folderPath = normalizePath(
-              `${folderToSync}/resources/${resourcePathSplitted
-                .slice(0, i + 1)
-                .join("/")}`,
-            )
-            const isFolderExists = await adapter.exists(folderPath)
-            if (!isFolderExists) {
-              await vault.createFolder(folderPath)
-            }
-          }
-        }
-
-        const resourceContent = await getAttachmentContent(resource, auth)
-        if (!resourceContent) {
-          return
-        }
-        adapter.writeBinary(resourcePath, resourceContent).catch((e) => {
-          console.error(e)
-        })
-      }
-
-      // delete memos and resources that are not in the API response
-      const memosInAPI = memos.map(
-        (memo) =>
-          `${folderToSync}/memos/${getFileName(
-            memo,
-            this.settings.fileNameFormat,
-          )}.md`,
-      )
-      const resourcesInAPI = res.files.map(
-        (resource) => `${folderToSync}/resources/${resource.filename}`,
-      )
-
-      const memosInVault = await adapter.list(`${folderToSync}/memos`)
-
-      for (const memo of memosInVault.files) {
-        if (!memosInAPI.includes(memo)) {
-          await adapter.remove(memo)
-        }
-      }
-
-      const resourcesInVault = await adapter.list(`${folderToSync}/resources`)
-
-      for (const resource of resourcesInVault.files) {
-        if (!resourcesInAPI.includes(resource)) {
-          await adapter.remove(resource)
-        }
-      }
 
       new Notice("Successfully synced memos.")
+
+      new Notice(`Successfully synced memos. Total: ${memos.length}, Same: ${sameCount}, Updated: ${updatedCount}, New: ${newCount}.`);
 
       this.saveData({
         ...this.settings,
@@ -240,19 +227,19 @@ export default class MemosSyncPlugin extends Plugin {
 }
 
 class MemosSyncSettingTab extends PluginSettingTab {
-  plugin: MemosSyncPlugin
+  plugin: MemosSyncPlugin;
 
   constructor(app: App, plugin: MemosSyncPlugin) {
-    super(app, plugin)
-    this.plugin = plugin
+    super(app, plugin);
+    this.plugin = plugin;
   }
 
   display(): void {
-    const { containerEl } = this
+    const { containerEl } = this;
 
-    containerEl.empty()
+    containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Settings for Memos Sync." })
+    containerEl.createEl("h2", { text: "Memos Sync Settings" });
 
     new Setting(containerEl)
       .setName("Base URL")
@@ -267,7 +254,7 @@ class MemosSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.auth.baseUrl = value
             await this.plugin.saveSettings()
           }),
-      )
+      );
 
     new Setting(containerEl)
       .setName("Access Token")
@@ -280,7 +267,7 @@ class MemosSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.auth.accessToken = value
             await this.plugin.saveSettings()
           }),
-      )
+      );
 
     new Setting(containerEl)
       .setName("Open ID")
@@ -293,7 +280,7 @@ class MemosSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.auth.openId = ""
             await this.plugin.saveSettings()
           }),
-      )
+      );
 
     new Setting(containerEl)
       .setName("Folder to sync")
@@ -310,7 +297,7 @@ class MemosSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.folderToSync = value
             await this.plugin.saveSettings()
           }),
-      )
+      );
 
     new Setting(containerEl)
       .setName("File name format")
@@ -326,7 +313,7 @@ class MemosSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.fileNameFormat = value as FileNameFormat
             await this.plugin.saveSettings()
           }),
-      )
+      );
 
     new Setting(containerEl)
       .setName("Sync interval")
@@ -345,6 +332,6 @@ class MemosSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings()
             await this.plugin.registerSyncInterval()
           }),
-      )
+      );
   }
 }

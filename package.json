@@ -16,7 +16,8 @@
   },
   "prettier": "@planet-matrix/prettier-config",
   "dependencies": {
-    "kirika": "^0.5.7"
+    "kirika": "^0.5.7",
+    "obsidian-daily-notes-interface": "^0.9.4"
   },
   "devDependencies": {
     "@planet-matrix/eslint-config": "^0.1.6",
